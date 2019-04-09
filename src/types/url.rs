@@ -23,7 +23,7 @@ impl FromSql for Url {
 
 #[cfg(test)]
 mod test {
-    use crate::{params, Connection, Error, Result};
+    use crate::{Connection, Error, Result};
     use url::{ParseError, Url};
 
     fn checked_memory_handle() -> Connection {
@@ -34,7 +34,7 @@ mod test {
     }
 
     fn get_url(db: &Connection, id: i64) -> Result<Url> {
-        db.query_row("SELECT v FROM urls WHERE i = ?", params![id], |r| r.get(0))
+        db.query_row("SELECT v FROM urls WHERE i = ?", &[&id], |r| r.get(0))
     }
 
     #[test]
@@ -49,7 +49,7 @@ mod test {
             "INSERT INTO urls (i, v) VALUES (0, ?), (1, ?), (2, ?), (3, ?)",
             // also insert a non-hex encoded url (which might be present if it was
             // inserted separately)
-            params![url0, url1, url2, "illegal"],
+            &[&url0, &url1, &url2, &"illegal"],
         )
         .unwrap();
 

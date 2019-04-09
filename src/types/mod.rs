@@ -112,7 +112,7 @@ mod test {
     use time;
 
     use super::Value;
-    use crate::{Connection, Error, NO_PARAMS};
+    use crate::{Connection, Error};
     use std::f64::EPSILON;
     use std::os::raw::{c_double, c_int};
 
@@ -132,7 +132,7 @@ mod test {
             .unwrap();
 
         let v: Vec<u8> = db
-            .query_row("SELECT b FROM foo", NO_PARAMS, |r| r.get(0))
+            .query_row("SELECT b FROM foo", &[], |r| r.get(0))
             .unwrap();
         assert_eq!(v, v1234);
     }
@@ -146,7 +146,7 @@ mod test {
             .unwrap();
 
         let v: Vec<u8> = db
-            .query_row("SELECT b FROM foo", NO_PARAMS, |r| r.get(0))
+            .query_row("SELECT b FROM foo", &[], |r| r.get(0))
             .unwrap();
         assert_eq!(v, empty);
     }
@@ -159,7 +159,7 @@ mod test {
         db.execute("INSERT INTO foo(t) VALUES (?)", &[&s]).unwrap();
 
         let from: String = db
-            .query_row("SELECT t FROM foo", NO_PARAMS, |r| r.get(0))
+            .query_row("SELECT t FROM foo", &[], |r| r.get(0))
             .unwrap();
         assert_eq!(from, s);
     }
@@ -169,11 +169,11 @@ mod test {
         let db = checked_memory_handle();
 
         let s = "hello, world!";
-        db.execute("INSERT INTO foo(t) VALUES (?)", &[s.to_owned()])
+        db.execute("INSERT INTO foo(t) VALUES (?)", &[&s.to_owned()])
             .unwrap();
 
         let from: String = db
-            .query_row("SELECT t FROM foo", NO_PARAMS, |r| r.get(0))
+            .query_row("SELECT t FROM foo", &[], |r| r.get(0))
             .unwrap();
         assert_eq!(from, s);
     }
@@ -182,12 +182,12 @@ mod test {
     fn test_value() {
         let db = checked_memory_handle();
 
-        db.execute("INSERT INTO foo(i) VALUES (?)", &[Value::Integer(10)])
+        db.execute("INSERT INTO foo(i) VALUES (?)", &[&Value::Integer(10)])
             .unwrap();
 
         assert_eq!(
             10i64,
-            db.query_row::<i64, _, _>("SELECT i FROM foo", NO_PARAMS, |r| r.get(0))
+            db.query_row::<i64, _>("SELECT i FROM foo", &[], |r| r.get(0))
                 .unwrap()
         );
     }
@@ -205,7 +205,7 @@ mod test {
         let mut stmt = db
             .prepare("SELECT t, b FROM foo ORDER BY ROWID ASC")
             .unwrap();
-        let mut rows = stmt.query(NO_PARAMS).unwrap();
+        let mut rows = stmt.query(&[]).unwrap();
 
         {
             let row1 = rows.next().unwrap().unwrap();
@@ -238,12 +238,12 @@ mod test {
 
         db.execute(
             "INSERT INTO foo(b, t, i, f) VALUES (X'0102', 'text', 1, 1.5)",
-            NO_PARAMS,
+            &[],
         )
         .unwrap();
 
         let mut stmt = db.prepare("SELECT b, t, i, f, n FROM foo").unwrap();
-        let mut rows = stmt.query(NO_PARAMS).unwrap();
+        let mut rows = stmt.query(&[]).unwrap();
 
         let row = rows.next().unwrap().unwrap();
 
@@ -346,12 +346,12 @@ mod test {
 
         db.execute(
             "INSERT INTO foo(b, t, i, f) VALUES (X'0102', 'text', 1, 1.5)",
-            NO_PARAMS,
+            &[],
         )
         .unwrap();
 
         let mut stmt = db.prepare("SELECT b, t, i, f, n FROM foo").unwrap();
-        let mut rows = stmt.query(NO_PARAMS).unwrap();
+        let mut rows = stmt.query(&[]).unwrap();
 
         let row = rows.next().unwrap().unwrap();
         assert_eq!(Value::Blob(vec![1, 2]), row.get::<_, Value>(0).unwrap());

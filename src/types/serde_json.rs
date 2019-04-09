@@ -29,7 +29,7 @@ impl FromSql for Value {
 mod test {
     use super::serde_json;
     use crate::types::ToSql;
-    use crate::{Connection, NO_PARAMS};
+    use crate::{Connection};
 
     fn checked_memory_handle() -> Connection {
         let db = Connection::open_in_memory().unwrap();
@@ -51,11 +51,11 @@ mod test {
         .unwrap();
 
         let t: serde_json::Value = db
-            .query_row("SELECT t FROM foo", NO_PARAMS, |r| r.get(0))
+            .query_row("SELECT t FROM foo", &[], |r| r.get(0))
             .unwrap();
         assert_eq!(data, t);
         let b: serde_json::Value = db
-            .query_row("SELECT b FROM foo", NO_PARAMS, |r| r.get(0))
+            .query_row("SELECT b FROM foo", &[], |r| r.get(0))
             .unwrap();
         assert_eq!(data, b);
     }

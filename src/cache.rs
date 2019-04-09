@@ -152,7 +152,7 @@ impl StatementCache {
 #[cfg(test)]
 mod test {
     use super::StatementCache;
-    use crate::{Connection, NO_PARAMS};
+    use crate::{Connection};
     use fallible_iterator::FallibleIterator;
 
     impl StatementCache {
@@ -183,7 +183,7 @@ mod test {
             assert_eq!(0, cache.len());
             assert_eq!(
                 0,
-                stmt.query_row(NO_PARAMS, |r| r.get::<_, i64>(0)).unwrap()
+                stmt.query_row(&[], |r| r.get::<_, i64>(0)).unwrap()
             );
         }
         assert_eq!(1, cache.len());
@@ -193,7 +193,7 @@ mod test {
             assert_eq!(0, cache.len());
             assert_eq!(
                 0,
-                stmt.query_row(NO_PARAMS, |r| r.get::<_, i64>(0)).unwrap()
+                stmt.query_row(&[], |r| r.get::<_, i64>(0)).unwrap()
             );
         }
         assert_eq!(1, cache.len());
@@ -214,7 +214,7 @@ mod test {
             assert_eq!(0, cache.len());
             assert_eq!(
                 0,
-                stmt.query_row(NO_PARAMS, |r| r.get::<_, i64>(0)).unwrap()
+                stmt.query_row(&[], |r| r.get::<_, i64>(0)).unwrap()
             );
         }
         assert_eq!(1, cache.len());
@@ -227,7 +227,7 @@ mod test {
             assert_eq!(0, cache.len());
             assert_eq!(
                 0,
-                stmt.query_row(NO_PARAMS, |r| r.get::<_, i64>(0)).unwrap()
+                stmt.query_row(&[], |r| r.get::<_, i64>(0)).unwrap()
             );
         }
         assert_eq!(0, cache.len());
@@ -238,7 +238,7 @@ mod test {
             assert_eq!(0, cache.len());
             assert_eq!(
                 0,
-                stmt.query_row(NO_PARAMS, |r| r.get::<_, i64>(0)).unwrap()
+                stmt.query_row(&[], |r| r.get::<_, i64>(0)).unwrap()
             );
         }
         assert_eq!(1, cache.len());
@@ -255,7 +255,7 @@ mod test {
             assert_eq!(0, cache.len());
             assert_eq!(
                 0,
-                stmt.query_row(NO_PARAMS, |r| r.get::<_, i64>(0)).unwrap()
+                stmt.query_row(&[], |r| r.get::<_, i64>(0)).unwrap()
             );
             stmt.discard();
         }
@@ -279,7 +279,7 @@ mod test {
             let mut stmt = db.prepare_cached(sql).unwrap();
             assert_eq!(
                 Ok(Some(1i32)),
-                stmt.query(NO_PARAMS).unwrap().map(|r| r.get(0)).next()
+                stmt.query(&[]).unwrap().map(|r| r.get(0)).next()
             );
         }
 
@@ -295,7 +295,7 @@ mod test {
             let mut stmt = db.prepare_cached(sql).unwrap();
             assert_eq!(
                 Ok(Some((1i32, 2i32))),
-                stmt.query(NO_PARAMS)
+                stmt.query(&[])
                     .unwrap()
                     .map(|r| Ok((r.get(0)?, r.get(1)?)))
                     .next()
@@ -324,7 +324,7 @@ mod test {
             assert_eq!(0, cache.len());
             assert_eq!(
                 0,
-                stmt.query_row(NO_PARAMS, |r| r.get::<_, i64>(0)).unwrap()
+                stmt.query_row(&[], |r| r.get::<_, i64>(0)).unwrap()
             );
         }
         assert_eq!(1, cache.len());
@@ -334,7 +334,7 @@ mod test {
             assert_eq!(0, cache.len());
             assert_eq!(
                 0,
-                stmt.query_row(NO_PARAMS, |r| r.get::<_, i64>(0)).unwrap()
+                stmt.query_row(&[], |r| r.get::<_, i64>(0)).unwrap()
             );
         }
         assert_eq!(1, cache.len());

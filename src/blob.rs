@@ -15,7 +15,7 @@
 //!
 //! ```rust
 //! use rusqlite::blob::ZeroBlob;
-//! use rusqlite::{Connection, DatabaseName, NO_PARAMS};
+//! use rusqlite::{Connection, DatabaseName, &[]};
 //! use std::error::Error;
 //! use std::io::{Read, Seek, SeekFrom, Write};
 //!
@@ -24,7 +24,7 @@
 //!     db.execute_batch("CREATE TABLE test (content BLOB);")?;
 //!     db.execute(
 //!         "INSERT INTO test (content) VALUES (ZEROBLOB(10))",
-//!         NO_PARAMS,
+//!         &[],
 //!     )?;
 //!
 //!     let rowid = db.last_insert_rowid();

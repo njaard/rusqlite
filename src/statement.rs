@@ -46,10 +46,7 @@ impl Statement<'_> {
     /// Will return `Err` if binding parameters fails, the executed statement
     /// returns rows (in which case `query` should be used instead), or the
     /// underling SQLite call fails.
-    pub fn execute<P>(&mut self, params: P) -> Result<usize>
-    where
-        P: IntoIterator,
-        P::Item: ToSql,
+    pub fn execute(&mut self, params: &[&ToSql]) -> Result<usize>
     {
         self.bind_parameters(params)?;
         self.execute_with_bound_parameters()
@@ -108,10 +105,7 @@ impl Statement<'_> {
     /// # Failure
     ///
     /// Will return `Err` if no row is inserted or many rows are inserted.
-    pub fn insert<P>(&mut self, params: P) -> Result<i64>
-    where
-        P: IntoIterator,
-        P::Item: ToSql,
+    pub fn insert(&mut self, params:  &[&ToSql]) -> Result<i64>
     {
         let changes = self.execute(params)?;
         match changes {
@@ -130,10 +124,10 @@ impl Statement<'_> {
     /// ## Example
     ///
     /// ```rust,no_run
-    /// # use rusqlite::{Connection, Result, NO_PARAMS};
+    /// # use rusqlite::{Connection, Result, &[]};
     /// fn get_names(conn: &Connection) -> Result<Vec<String>> {
     ///     let mut stmt = conn.prepare("SELECT name FROM people")?;
-    ///     let mut rows = stmt.query(NO_PARAMS)?;
+    ///     let mut rows = stmt.query(&[])?;
     ///
     ///     let mut names = Vec::new();
     ///     while let Some(row) = rows.next()? {
@@ -147,10 +141,7 @@ impl Statement<'_> {
     /// ## Failure
     ///
     /// Will return `Err` if binding parameters fails.
-    pub fn query<P>(&mut self, params: P) -> Result<Rows<'_>>
-    where
-        P: IntoIterator,
-        P::Item: ToSql,
+    pub fn query(&mut self, params: &[&ToSql]) -> Result<Rows<'_>>
     {
         self.check_readonly()?;
         self.bind_parameters(params)?;
@@ -207,10 +198,10 @@ impl Statement<'_> {
     /// ## Example
     ///
     /// ```rust,no_run
-    /// # use rusqlite::{Connection, Result, NO_PARAMS};
+    /// # use rusqlite::{Connection, Result, &[]};
     /// fn get_names(conn: &Connection) -> Result<Vec<String>> {
     ///     let mut stmt = conn.prepare("SELECT name FROM people")?;
-    ///     let rows = stmt.query_map(NO_PARAMS, |row| row.get(0))?;
+    ///     let rows = stmt.query_map(&[], |row| row.get(0))?;
     ///
     ///     let mut names = Vec::new();
     ///     for name_result in rows {
@@ -224,10 +215,8 @@ impl Statement<'_> {
     /// ## Failure
     ///
     /// Will return `Err` if binding parameters fails.
-    pub fn query_map<T, P, F>(&mut self, params: P, f: F) -> Result<MappedRows<'_, F>>
+    pub fn query_map<T, F>(&mut self, params: &[&ToSql], f: F) -> Result<MappedRows<'_, F>>
     where
-        P: IntoIterator,
-        P::Item: ToSql,
         F: FnMut(&Row<'_>) -> Result<T>,
     {
         let rows = self.query(params)?;
@@ -280,10 +269,8 @@ impl Statement<'_> {
     /// # Failure
     ///
     /// Will return `Err` if binding parameters fails.
-    pub fn query_and_then<T, E, P, F>(&mut self, params: P, f: F) -> Result<AndThenRows<'_, F>>
+    pub fn query_and_then<T, E, F>(&mut self, params: &[&ToSql], f: F) -> Result<AndThenRows<'_, F>>
     where
-        P: IntoIterator,
-        P::Item: ToSql,
         E: convert::From<Error>,
         F: FnMut(&Row<'_>) -> result::Result<T, E>,
     {
@@ -344,10 +331,7 @@ impl Statement<'_> {
 
     /// Return `true` if a query in the SQL statement it executes returns one
     /// or more rows and `false` if the SQL returns an empty set.
-    pub fn exists<P>(&mut self, params: P) -> Result<bool>
-    where
-        P: IntoIterator,
-        P::Item: ToSql,
+    pub fn exists(&mut self, params: &[&ToSql]) -> Result<bool>
     {
         let mut rows = self.query(params)?;
         let exists = rows.next()?.is_some();
@@ -367,10 +351,8 @@ impl Statement<'_> {
     /// # Failure
     ///
     /// Will return `Err` if the underlying SQLite call fails.
-    pub fn query_row<T, P, F>(&mut self, params: P, f: F) -> Result<T>
+    pub fn query_row<T, F>(&mut self, params:  &[&ToSql], f: F) -> Result<T>
     where
-        P: IntoIterator,
-        P::Item: ToSql,
         F: FnOnce(&Row<'_>) -> Result<T>,
     {
         let mut rows = self.query(params)?;
@@ -401,10 +383,7 @@ impl Statement<'_> {
         Ok(self.stmt.bind_parameter_index(&c_name))
     }
 
-    fn bind_parameters<P>(&mut self, params: P) -> Result<()>
-    where
-        P: IntoIterator,
-        P::Item: ToSql,
+    fn bind_parameters(&mut self, params: &[&ToSql]) -> Result<()>
     {
         let expected = self.stmt.bind_parameter_count();
         let mut index = 0;
@@ -674,8 +653,7 @@ pub enum StatementStatus {
 
 #[cfg(test)]
 mod test {
-    use crate::types::ToSql;
-    use crate::{Connection, Error, Result, NO_PARAMS};
+    use crate::{Connection, Error, Result};
 
     #[test]
     fn test_execute_named() {
@@ -817,7 +795,7 @@ mod test {
         stmt.execute_named(&[(":x", &"one")]).unwrap();
 
         let result: Option<String> = db
-            .query_row("SELECT y FROM test WHERE x = 'one'", NO_PARAMS, |row| {
+            .query_row("SELECT y FROM test WHERE x = 'one'", &[], |row| {
                 row.get(0)
             })
             .unwrap();
@@ -837,7 +815,7 @@ mod test {
         stmt.execute_named(&[(":y", &"two")]).unwrap();
 
         let result: String = db
-            .query_row("SELECT x FROM test WHERE y = 'two'", NO_PARAMS, |row| {
+            .query_row("SELECT x FROM test WHERE y = 'two'", &[], |row| {
                 row.get(0)
             })
             .unwrap();
@@ -852,16 +830,16 @@ mod test {
         let mut stmt = db
             .prepare("INSERT OR IGNORE INTO foo (x) VALUES (?)")
             .unwrap();
-        assert_eq!(stmt.insert(&[1i32]).unwrap(), 1);
-        assert_eq!(stmt.insert(&[2i32]).unwrap(), 2);
-        match stmt.insert(&[1i32]).unwrap_err() {
+        assert_eq!(stmt.insert(&[&1i32]).unwrap(), 1);
+        assert_eq!(stmt.insert(&[&2i32]).unwrap(), 2);
+        match stmt.insert(&[&1i32]).unwrap_err() {
             Error::StatementChangedRows(0) => (),
             err => panic!("Unexpected error {}", err),
         }
         let mut multi = db
             .prepare("INSERT INTO foo (x) SELECT 3 UNION ALL SELECT 4")
             .unwrap();
-        match multi.insert(NO_PARAMS).unwrap_err() {
+        match multi.insert(&[]).unwrap_err() {
             Error::StatementChangedRows(2) => (),
             err => panic!("Unexpected error {}", err),
         }
@@ -882,14 +860,14 @@ mod test {
         assert_eq!(
             db.prepare("INSERT INTO foo VALUES (10)")
                 .unwrap()
-                .insert(NO_PARAMS)
+                .insert(&[])
                 .unwrap(),
             1
         );
         assert_eq!(
             db.prepare("INSERT INTO bar VALUES (10)")
                 .unwrap()
-                .insert(NO_PARAMS)
+                .insert(&[])
                 .unwrap(),
             1
         );
@@ -905,9 +883,9 @@ mod test {
                    END;";
         db.execute_batch(sql).unwrap();
         let mut stmt = db.prepare("SELECT 1 FROM foo WHERE x = ?").unwrap();
-        assert!(stmt.exists(&[1i32]).unwrap());
-        assert!(stmt.exists(&[2i32]).unwrap());
-        assert!(!stmt.exists(&[0i32]).unwrap());
+        assert!(stmt.exists(&[&1i32]).unwrap());
+        assert!(stmt.exists(&[&2i32]).unwrap());
+        assert!(!stmt.exists(&[&0i32]).unwrap());
     }
 
     #[test]
@@ -920,7 +898,7 @@ mod test {
                    END;";
         db.execute_batch(sql).unwrap();
         let mut stmt = db.prepare("SELECT y FROM foo WHERE x = ?").unwrap();
-        let y: Result<i64> = stmt.query_row(&[1i32], |r| r.get(0));
+        let y: Result<i64> = stmt.query_row(&[&1i32], |r| r.get(0));
         assert_eq!(3i64, y.unwrap());
     }
 
@@ -933,7 +911,7 @@ mod test {
                    END;";
         db.execute_batch(sql).unwrap();
         let mut stmt = db.prepare("SELECT y FROM foo").unwrap();
-        let y: Result<i64> = stmt.query_row(NO_PARAMS, |r| r.get("y"));
+        let y: Result<i64> = stmt.query_row(&[], |r| r.get("y"));
         assert_eq!(3i64, y.unwrap());
     }
 
@@ -946,7 +924,7 @@ mod test {
                    END;";
         db.execute_batch(sql).unwrap();
         let mut stmt = db.prepare("SELECT y as Y FROM foo").unwrap();
-        let y: Result<i64> = stmt.query_row(NO_PARAMS, |r| r.get("y"));
+        let y: Result<i64> = stmt.query_row(&[], |r| r.get("y"));
         assert_eq!(3i64, y.unwrap());
     }
 
@@ -957,41 +935,5 @@ mod test {
         let stmt = db.prepare("SELECT ?").unwrap();
         stmt.bind_parameter(&1, 1).unwrap();
         assert_eq!(Some("SELECT 1"), stmt.expanded_sql());
-    }
-
-    #[test]
-    fn test_bind_parameters() {
-        let db = Connection::open_in_memory().unwrap();
-        // dynamic slice:
-        db.query_row(
-            "SELECT ?1, ?2, ?3",
-            &[&1u8 as &dyn ToSql, &"one", &Some("one")],
-            |row| row.get::<_, u8>(0),
-        )
-        .unwrap();
-        // existing collection:
-        let data = vec![1, 2, 3];
-        db.query_row("SELECT ?1, ?2, ?3", &data, |row| row.get::<_, u8>(0))
-            .unwrap();
-        db.query_row("SELECT ?1, ?2, ?3", data.as_slice(), |row| {
-            row.get::<_, u8>(0)
-        })
-        .unwrap();
-        db.query_row("SELECT ?1, ?2, ?3", data, |row| row.get::<_, u8>(0))
-            .unwrap();
-
-        use std::collections::BTreeSet;
-        let data: BTreeSet<String> = ["one", "two", "three"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        db.query_row("SELECT ?1, ?2, ?3", &data, |row| row.get::<_, String>(0))
-            .unwrap();
-
-        let data = [0; 3];
-        db.query_row("SELECT ?1, ?2, ?3", &data, |row| row.get::<_, u8>(0))
-            .unwrap();
-        db.query_row("SELECT ?1, ?2, ?3", data.iter(), |row| row.get::<_, u8>(0))
-            .unwrap();
     }
 }

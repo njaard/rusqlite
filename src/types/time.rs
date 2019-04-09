@@ -37,7 +37,7 @@ impl FromSql for time::Timespec {
 #[cfg(test)]
 mod test {
     use super::time;
-    use crate::{Connection, Result, NO_PARAMS};
+    use crate::{Connection, Result};
 
     fn checked_memory_handle() -> Connection {
         let db = Connection::open_in_memory().unwrap();
@@ -63,10 +63,10 @@ mod test {
             db.execute("INSERT INTO foo(t) VALUES (?)", &[&ts]).unwrap();
 
             let from: time::Timespec = db
-                .query_row("SELECT t FROM foo", NO_PARAMS, |r| r.get(0))
+                .query_row("SELECT t FROM foo", &[], |r| r.get(0))
                 .unwrap();
 
-            db.execute("DELETE FROM foo", NO_PARAMS).unwrap();
+            db.execute("DELETE FROM foo", &[]).unwrap();
 
             assert_eq!(from, ts);
         }
@@ -76,7 +76,7 @@ mod test {
     fn test_sqlite_functions() {
         let db = checked_memory_handle();
         let result: Result<time::Timespec> =
-            db.query_row("SELECT CURRENT_TIMESTAMP", NO_PARAMS, |r| r.get(0));
+            db.query_row("SELECT CURRENT_TIMESTAMP", &[], |r| r.get(0));
         assert!(result.is_ok());
     }
 }
