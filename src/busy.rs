@@ -75,12 +75,11 @@ impl InnerConnection {
 
 #[cfg(test)]
 mod test {
-    use self::tempdir::TempDir;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::sync_channel;
     use std::thread;
     use std::time::Duration;
-    use tempdir;
+    use tempdir::TempDir;
 
     use crate::{Connection, Error, ErrorCode, Result, TransactionBehavior};
 
@@ -137,7 +136,7 @@ mod test {
     #[test]
     #[ignore] // FIXME: unstable
     fn test_busy_handler() {
-        lazy_static! {
+        lazy_static::lazy_static! {
             static ref CALLED: AtomicBool = AtomicBool::new(false);
         }
         fn busy_handler(_: i32) -> bool {

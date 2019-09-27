@@ -67,6 +67,7 @@ pub struct Module<T: VTab> {
     phantom: PhantomData<T>,
 }
 
+unsafe impl<T: VTab> Send for Module<T> {}
 unsafe impl<T: VTab> Sync for Module<T> {}
 
 /// Create a read-only virtual table implementation.
@@ -233,7 +234,7 @@ pub trait CreateVTab: VTab {
     }
 }
 
-bitflags! {
+bitflags::bitflags! {
     #[doc = "Index constraint operator."]
     #[repr(C)]
     pub struct IndexConstraintOp: ::std::os::raw::c_uchar {
@@ -472,7 +473,13 @@ impl Values<'_> {
             }
             FromSqlError::OutOfRange(i) => Error::IntegralValueOutOfRange(idx, i),
             #[cfg(feature = "i128_blob")]
-            FromSqlError::InvalidI128Size(_) => Error::InvalidColumnType(idx, value.data_type()),
+            FromSqlError::InvalidI128Size(_) => {
+                Error::InvalidColumnType(idx, idx.to_string(), value.data_type())
+            }
+            #[cfg(feature = "uuid")]
+            FromSqlError::InvalidUuidSize(_) => {
+                Error::FromSqlConversionFailure(idx, value.data_type(), Box::new(err))
+            }
         })
     }
 
@@ -641,7 +648,6 @@ where
 {
     use std::error::Error as StdError;
     use std::ffi::CStr;
-    use std::slice;
 
     let mut conn = VTabConnection(db);
     let aux = aux as *mut T::Aux;
@@ -695,7 +701,6 @@ where
 {
     use std::error::Error as StdError;
     use std::ffi::CStr;
-    use std::slice;
 
     let mut conn = VTabConnection(db);
     let aux = aux as *mut T::Aux;
@@ -848,7 +853,6 @@ where
     C: VTabCursor,
 {
     use std::ffi::CStr;
-    use std::slice;
     use std::str;
     let idx_name = if idx_str.is_null() {
         None
@@ -981,7 +985,7 @@ fn mprintf(err_msg: &str) -> *mut c_char {
 pub mod array;
 #[cfg(feature = "csvtab")]
 pub mod csvtab;
-#[cfg(feature = "bundled")]
+#[cfg(feature = "series")]
 pub mod series; // SQLite >= 3.9.0
 
 #[cfg(test)]

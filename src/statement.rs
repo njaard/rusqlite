@@ -45,7 +45,7 @@ impl Statement<'_> {
     ///
     /// Will return `Err` if binding parameters fails, the executed statement
     /// returns rows (in which case `query` should be used instead), or the
-    /// underling SQLite call fails.
+    /// underlying SQLite call fails.
     pub fn execute(&mut self, params: &[&ToSql]) -> Result<usize>
     {
         self.bind_parameters(params)?;
@@ -86,7 +86,7 @@ impl Statement<'_> {
     ///
     /// Will return `Err` if binding parameters fails, the executed statement
     /// returns rows (in which case `query` should be used instead), or the
-    /// underling SQLite call fails.
+    /// underlying SQLite call fails.
     pub fn execute_named(&mut self, params: &[(&str, &dyn ToSql)]) -> Result<usize> {
         self.bind_parameters_named(params)?;
         self.execute_with_bound_parameters()
@@ -360,6 +360,29 @@ impl Statement<'_> {
         rows.get_expected_row().and_then(|r| f(&r))
     }
 
+    /// Convenience method to execute a query with named parameter(s) that is
+    /// expected to return a single row.
+    ///
+    /// If the query returns more than one row, all rows except the first are
+    /// ignored.
+    ///
+    /// Returns `Err(QueryReturnedNoRows)` if no results are returned. If the
+    /// query truly is optional, you can call `.optional()` on the result of
+    /// this to get a `Result<Option<T>>`.
+    ///
+    /// # Failure
+    ///
+    /// Will return `Err` if `sql` cannot be converted to a C-compatible string
+    /// or if the underlying SQLite call fails.
+    pub fn query_row_named<T, F>(&mut self, params: &[(&str, &dyn ToSql)], f: F) -> Result<T>
+    where
+        F: FnOnce(&Row<'_>) -> Result<T>,
+    {
+        let mut rows = self.query_named(params)?;
+
+        rows.get_expected_row().and_then(|r| f(&r))
+    }
+
     /// Consumes the statement.
     ///
     /// Functionally equivalent to the `Drop` implementation, but allows
@@ -467,6 +490,7 @@ impl Statement<'_> {
     }
 
     fn execute_with_bound_parameters(&mut self) -> Result<usize> {
+        self.check_update()?;
         let r = self.stmt.step();
         self.stmt.reset();
         match r {
@@ -483,7 +507,7 @@ impl Statement<'_> {
     }
 
     fn finalize_(&mut self) -> Result<()> {
-        let mut stmt = RawStatement::new(ptr::null_mut());
+        let mut stmt = RawStatement::new(ptr::null_mut(), false);
         mem::swap(&mut stmt, &mut self.stmt);
         self.conn.decode_result(stmt.finalize())
     }
@@ -503,14 +527,43 @@ impl Statement<'_> {
         Ok(())
     }
 
+    #[cfg(all(feature = "bundled", feature = "extra_check"))]
+    #[inline]
+    fn check_update(&self) -> Result<()> {
+        if self.column_count() > 0 || self.stmt.readonly() {
+            return Err(Error::ExecuteReturnedResults);
+        }
+        Ok(())
+    }
+
+    #[cfg(all(not(feature = "bundled"), feature = "extra_check"))]
+    #[inline]
+    fn check_update(&self) -> Result<()> {
+        if self.column_count() > 0 {
+            return Err(Error::ExecuteReturnedResults);
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "extra_check"))]
+    #[inline]
+    fn check_update(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Returns a string containing the SQL text of prepared statement with
     /// bound parameters expanded.
     #[cfg(feature = "bundled")]
-    pub fn expanded_sql(&self) -> Option<&str> {
+    pub fn expanded_sql(&self) -> Option<String> {
         unsafe {
-            self.stmt
-                .expanded_sql()
-                .map(|s| str::from_utf8_unchecked(s.to_bytes()))
+            match self.stmt.expanded_sql() {
+                Some(s) => {
+                    let sql = str::from_utf8_unchecked(s.to_bytes()).to_owned();
+                    ffi::sqlite3_free(s.as_ptr() as *mut _);
+                    Some(sql)
+                }
+                _ => None,
+            }
         }
     }
 
@@ -524,11 +577,26 @@ impl Statement<'_> {
     pub fn reset_status(&self, status: StatementStatus) -> i32 {
         self.stmt.get_status(status, true)
     }
+
+    #[cfg(feature = "extra_check")]
+    pub(crate) fn check_no_tail(&self) -> Result<()> {
+        if self.stmt.has_tail() {
+            Err(Error::MultipleStatement)
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(not(feature = "extra_check"))]
+    #[inline]
+    pub(crate) fn check_no_tail(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 impl Into<RawStatement> for Statement<'_> {
     fn into(mut self) -> RawStatement {
-        let mut stmt = RawStatement::new(ptr::null_mut());
+        let mut stmt = RawStatement::new(ptr::null_mut(), false);
         mem::swap(&mut stmt, &mut self.stmt);
         stmt
     }
@@ -578,10 +646,7 @@ impl Statement<'_> {
                     CStr::from_ptr(text as *const c_char)
                 };
 
-                // sqlite3_column_text returns UTF8 data, so our unwrap here should be fine.
-                let s = s
-                    .to_str()
-                    .expect("sqlite3_column_text returned invalid UTF-8");
+                let s = s.to_bytes();
                 ValueRef::Text(s)
             }
             ffi::SQLITE_BLOB => {
@@ -694,14 +759,13 @@ mod test {
             .unwrap();
         stmt.execute_named(&[(":name", &"one")]).unwrap();
 
+        let mut stmt = db
+            .prepare("SELECT COUNT(*) FROM test WHERE name = :name")
+            .unwrap();
         assert_eq!(
             1i32,
-            db.query_row_named::<i32, _>(
-                "SELECT COUNT(*) FROM test WHERE name = :name",
-                &[(":name", &"one")],
-                |r| r.get(0)
-            )
-            .unwrap()
+            stmt.query_row_named::<i32, _>(&[(":name", &"one")], |r| r.get(0))
+                .unwrap()
         );
     }
 
@@ -934,6 +998,6 @@ mod test {
         let db = Connection::open_in_memory().unwrap();
         let stmt = db.prepare("SELECT ?").unwrap();
         stmt.bind_parameter(&1, 1).unwrap();
-        assert_eq!(Some("SELECT 1"), stmt.expanded_sql());
+        assert_eq!(Some("SELECT 1".to_owned()), stmt.expanded_sql());
     }
 }

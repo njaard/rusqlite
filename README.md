@@ -1,4 +1,4 @@
-based on rusqlite version 0.17:
+Based on rusqlite version 0.20:
 
 This is a fork of rusqlite with the `NO_PARAMS` and `params!` feature removed.
 
