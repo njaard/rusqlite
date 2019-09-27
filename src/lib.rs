@@ -411,7 +411,7 @@ impl Connection {
     ///
     /// Will return `Err` if `sql` cannot be converted to a C-compatible string
     /// or if the underlying SQLite call fails.
-    pub fn execute(&self, sql: &str, params: &[&ToSql]) -> Result<usize>
+    pub fn execute(&self, sql: &str, params: &[&dyn ToSql]) -> Result<usize>
     {
         self.prepare(sql)
             .and_then(|mut stmt| stmt.check_no_tail().and_then(|_| stmt.execute(params)))
@@ -481,7 +481,7 @@ impl Connection {
     ///
     /// Will return `Err` if `sql` cannot be converted to a C-compatible string
     /// or if the underlying SQLite call fails.
-    pub fn query_row<T, F>(&self, sql: &str, params: &[&ToSql], f: F) -> Result<T>
+    pub fn query_row<T, F>(&self, sql: &str, params: &[&dyn ToSql], f: F) -> Result<T>
     where
         F: FnOnce(&Row<'_>) -> Result<T>,
     {
@@ -538,7 +538,7 @@ impl Connection {
     ///
     /// Will return `Err` if `sql` cannot be converted to a C-compatible string
     /// or if the underlying SQLite call fails.
-    pub fn query_row_and_then<T, E, F>(&self, sql: &str, params: &[&ToSql], f: F) -> result::Result<T, E>
+    pub fn query_row_and_then<T, E, F>(&self, sql: &str, params: &[&dyn ToSql], f: F) -> result::Result<T, E>
     where
         F: FnOnce(&Row<'_>) -> result::Result<T, E>,
         E: convert::From<Error>,

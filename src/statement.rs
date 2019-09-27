@@ -46,7 +46,7 @@ impl Statement<'_> {
     /// Will return `Err` if binding parameters fails, the executed statement
     /// returns rows (in which case `query` should be used instead), or the
     /// underlying SQLite call fails.
-    pub fn execute(&mut self, params: &[&ToSql]) -> Result<usize>
+    pub fn execute(&mut self, params: &[&dyn ToSql]) -> Result<usize>
     {
         self.bind_parameters(params)?;
         self.execute_with_bound_parameters()
@@ -105,7 +105,7 @@ impl Statement<'_> {
     /// # Failure
     ///
     /// Will return `Err` if no row is inserted or many rows are inserted.
-    pub fn insert(&mut self, params:  &[&ToSql]) -> Result<i64>
+    pub fn insert(&mut self, params:  &[&dyn ToSql]) -> Result<i64>
     {
         let changes = self.execute(params)?;
         match changes {
@@ -141,7 +141,7 @@ impl Statement<'_> {
     /// ## Failure
     ///
     /// Will return `Err` if binding parameters fails.
-    pub fn query(&mut self, params: &[&ToSql]) -> Result<Rows<'_>>
+    pub fn query(&mut self, params: &[&dyn ToSql]) -> Result<Rows<'_>>
     {
         self.check_readonly()?;
         self.bind_parameters(params)?;
@@ -215,7 +215,7 @@ impl Statement<'_> {
     /// ## Failure
     ///
     /// Will return `Err` if binding parameters fails.
-    pub fn query_map<T, F>(&mut self, params: &[&ToSql], f: F) -> Result<MappedRows<'_, F>>
+    pub fn query_map<T, F>(&mut self, params: &[&dyn ToSql], f: F) -> Result<MappedRows<'_, F>>
     where
         F: FnMut(&Row<'_>) -> Result<T>,
     {
@@ -269,7 +269,7 @@ impl Statement<'_> {
     /// # Failure
     ///
     /// Will return `Err` if binding parameters fails.
-    pub fn query_and_then<T, E, F>(&mut self, params: &[&ToSql], f: F) -> Result<AndThenRows<'_, F>>
+    pub fn query_and_then<T, E, F>(&mut self, params: &[&dyn ToSql], f: F) -> Result<AndThenRows<'_, F>>
     where
         E: convert::From<Error>,
         F: FnMut(&Row<'_>) -> result::Result<T, E>,
@@ -331,7 +331,7 @@ impl Statement<'_> {
 
     /// Return `true` if a query in the SQL statement it executes returns one
     /// or more rows and `false` if the SQL returns an empty set.
-    pub fn exists(&mut self, params: &[&ToSql]) -> Result<bool>
+    pub fn exists(&mut self, params: &[&dyn ToSql]) -> Result<bool>
     {
         let mut rows = self.query(params)?;
         let exists = rows.next()?.is_some();
@@ -351,7 +351,7 @@ impl Statement<'_> {
     /// # Failure
     ///
     /// Will return `Err` if the underlying SQLite call fails.
-    pub fn query_row<T, F>(&mut self, params:  &[&ToSql], f: F) -> Result<T>
+    pub fn query_row<T, F>(&mut self, params:  &[&dyn ToSql], f: F) -> Result<T>
     where
         F: FnOnce(&Row<'_>) -> Result<T>,
     {
@@ -406,7 +406,7 @@ impl Statement<'_> {
         Ok(self.stmt.bind_parameter_index(&c_name))
     }
 
-    fn bind_parameters(&mut self, params: &[&ToSql]) -> Result<()>
+    fn bind_parameters(&mut self, params: &[&dyn ToSql]) -> Result<()>
     {
         let expected = self.stmt.bind_parameter_count();
         let mut index = 0;
