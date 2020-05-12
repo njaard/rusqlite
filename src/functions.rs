@@ -1019,7 +1019,7 @@ mod test {
             .unwrap();
 
         let results: Vec<(String, i64)> = stmt
-            .query(NO_PARAMS)
+            .query(&[])
             .unwrap()
             .map(|row| Ok((row.get("x")?, row.get("sum_y")?)))
             .collect()
