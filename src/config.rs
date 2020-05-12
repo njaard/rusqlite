@@ -8,6 +8,7 @@ use crate::{Connection, Result};
 /// Database Connection Configuration Options
 #[repr(i32)]
 #[allow(non_snake_case, non_camel_case_types)]
+#[non_exhaustive]
 pub enum DbConfig {
     //SQLITE_DBCONFIG_MAINDBNAME = 1000, /* const char* */
     //SQLITE_DBCONFIG_LOOKASIDE = 1001,  /* void* int int */
@@ -15,11 +16,25 @@ pub enum DbConfig {
     SQLITE_DBCONFIG_ENABLE_TRIGGER = 1003,
     SQLITE_DBCONFIG_ENABLE_FTS3_TOKENIZER = 1004, // 3.12.0
     //SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION = 1005,
-    SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE = 1006,
-    SQLITE_DBCONFIG_ENABLE_QPSG = 1007, // 3.20.0
-    SQLITE_DBCONFIG_TRIGGER_EQP = 1008,
+    SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE = 1006, // 3.16.2
+    SQLITE_DBCONFIG_ENABLE_QPSG = 1007,      // 3.20.0
+    SQLITE_DBCONFIG_TRIGGER_EQP = 1008,      // 3.22.0
     //SQLITE_DBCONFIG_RESET_DATABASE = 1009,
-    SQLITE_DBCONFIG_DEFENSIVE = 1010,
+    SQLITE_DBCONFIG_DEFENSIVE = 1010, // 3.26.0
+    #[cfg(feature = "modern_sqlite")]
+    SQLITE_DBCONFIG_WRITABLE_SCHEMA = 1011, // 3.28.0
+    #[cfg(feature = "modern_sqlite")]
+    SQLITE_DBCONFIG_LEGACY_ALTER_TABLE = 1012, // 3.29
+    #[cfg(feature = "modern_sqlite")]
+    SQLITE_DBCONFIG_DQS_DML = 1013, // 3.29.0
+    #[cfg(feature = "modern_sqlite")]
+    SQLITE_DBCONFIG_DQS_DDL = 1014, // 3.29.0
+    #[cfg(feature = "modern_sqlite")]
+    SQLITE_DBCONFIG_ENABLE_VIEW = 1015, // 3.30.0
+    #[cfg(feature = "modern_sqlite")]
+    SQLITE_DBCONFIG_LEGACY_FILE_FORMAT = 1016, // 3.31.0
+    #[cfg(feature = "modern_sqlite")]
+    SQLITE_DBCONFIG_TRUSTED_SCHEMA = 1017, // 3.31.0
 }
 
 impl Connection {

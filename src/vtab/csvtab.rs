@@ -1,22 +1,40 @@
-//! CSV Virtual Table.
+//! `feature = "csvtab"` CSV Virtual Table.
 //!
-//! Port of [csv](http://www.sqlite.org/cgi/src/finfo?name=ext/misc/csv.c) C extension.
-use csv;
+//! Port of [csv](http://www.sqlite.org/cgi/src/finfo?name=ext/misc/csv.c) C
+//! extension: https://www.sqlite.org/csv.html
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! # use rusqlite::{Connection, Result};
+//! fn example() -> Result<()> {
+//!     // Note: This should be done once (usually when opening the DB).
+//!     let db = Connection::open_in_memory()?;
+//!     rusqlite::vtab::csvtab::load_module(&db)?;
+//!     // Assum3e my_csv.csv
+//!     let schema = "
+//!         CREATE VIRTUAL TABLE my_csv_data
+//!         USING csv(filename = 'my_csv.csv')
+//!     ";
+//!     db.execute_batch(schema)?;
+//!     // Now the `my_csv_data` (virtual) table can be queried as normal...
+//!     Ok(())
+//! }
+//! ```
 use std::fs::File;
 use std::os::raw::c_int;
 use std::path::Path;
-use std::result;
 use std::str;
 
 use crate::ffi;
 use crate::types::Null;
 use crate::vtab::{
     dequote, escape_double_quote, parse_boolean, read_only_module, Context, CreateVTab, IndexInfo,
-    Module, VTab, VTabConnection, VTabCursor, Values,
+    VTab, VTabConnection, VTabCursor, Values,
 };
 use crate::{Connection, Error, Result};
 
-/// Register the "csv" module.
+/// `feature = "csvtab"` Register the "csv" module.
 /// ```sql
 /// CREATE VIRTUAL TABLE vtab USING csv(
 ///   filename=FILENAME -- Name of file containing CSV content
@@ -29,11 +47,7 @@ use crate::{Connection, Error, Result};
 /// ```
 pub fn load_module(conn: &Connection) -> Result<()> {
     let aux: Option<()> = None;
-    conn.create_module("csv", &CSV_MODULE, aux)
-}
-
-lazy_static::lazy_static! {
-    static ref CSV_MODULE: Module<CSVTab> = read_only_module::<CSVTab>(1);
+    conn.create_module("csv", read_only_module::<CSVTab>(), aux)
 }
 
 /// An instance of the CSV virtual table
@@ -51,7 +65,7 @@ struct CSVTab {
 }
 
 impl CSVTab {
-    fn reader(&self) -> result::Result<csv::Reader<File>, csv::Error> {
+    fn reader(&self) -> Result<csv::Reader<File>, csv::Error> {
         csv::ReaderBuilder::new()
             .has_headers(self.has_headers)
             .delimiter(self.delimiter)
@@ -81,7 +95,7 @@ impl CSVTab {
     }
 }
 
-impl VTab for CSVTab {
+unsafe impl VTab for CSVTab {
     type Aux = ();
     type Cursor = CSVTabCursor;
 
@@ -235,7 +249,7 @@ impl VTab for CSVTab {
             schema = Some(sql);
         }
 
-        Ok((schema.unwrap().to_owned(), vtab))
+        Ok((schema.unwrap(), vtab))
     }
 
     // Only a forward full table scan is supported.
@@ -282,7 +296,7 @@ impl CSVTabCursor {
     }
 }
 
-impl VTabCursor for CSVTabCursor {
+unsafe impl VTabCursor for CSVTabCursor {
     // Only a full table scan is supported.  So `filter` simply rewinds to
     // the beginning.
     fn filter(
@@ -338,8 +352,7 @@ impl VTabCursor for CSVTabCursor {
 
 impl From<csv::Error> for Error {
     fn from(err: csv::Error) -> Error {
-        use std::error::Error as StdError;
-        Error::ModuleError(String::from(err.description()))
+        Error::ModuleError(err.to_string())
     }
 }
 

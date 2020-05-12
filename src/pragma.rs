@@ -326,7 +326,7 @@ mod test {
     }
 
     #[test]
-    #[cfg(feature = "bundled")]
+    #[cfg(feature = "modern_sqlite")]
     fn pragma_func_query_value() {
         let db = Connection::open_in_memory().unwrap();
         let user_version: i32 = db
@@ -377,7 +377,7 @@ mod test {
     }
 
     #[test]
-    #[cfg(feature = "bundled")]
+    #[cfg(feature = "modern_sqlite")]
     fn pragma_func() {
         let db = Connection::open_in_memory().unwrap();
         let mut table_info = db.prepare("SELECT * FROM pragma_table_info(?)").unwrap();

@@ -110,12 +110,22 @@ impl<'a> From<&'a Value> for ValueRef<'a> {
     }
 }
 
+impl<'a, T> From<Option<T>> for ValueRef<'a>
+where
+    T: Into<ValueRef<'a>>,
+{
+    fn from(s: Option<T>) -> ValueRef<'a> {
+        match s {
+            Some(x) => x.into(),
+            None => ValueRef::Null,
+        }
+    }
+}
+
 #[cfg(any(feature = "functions", feature = "session", feature = "vtab"))]
 impl<'a> ValueRef<'a> {
     pub(crate) unsafe fn from_value(value: *mut crate::ffi::sqlite3_value) -> ValueRef<'a> {
         use crate::ffi;
-        use std::ffi::CStr;
-        use std::os::raw::c_char;
         use std::slice::from_raw_parts;
 
         match ffi::sqlite3_value_type(value) {
@@ -124,13 +134,12 @@ impl<'a> ValueRef<'a> {
             ffi::SQLITE_FLOAT => ValueRef::Real(ffi::sqlite3_value_double(value)),
             ffi::SQLITE_TEXT => {
                 let text = ffi::sqlite3_value_text(value);
+                let len = ffi::sqlite3_value_bytes(value);
                 assert!(
                     !text.is_null(),
                     "unexpected SQLITE_TEXT value type with NULL data"
                 );
-                let s = CStr::from_ptr(text as *const c_char);
-
-                let s = s.to_bytes();
+                let s = from_raw_parts(text as *const u8, len as usize);
                 ValueRef::Text(s)
             }
             ffi::SQLITE_BLOB => {

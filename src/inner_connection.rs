@@ -1,15 +1,14 @@
-use std::ffi::CString;
-use std::mem::MaybeUninit;
+use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 #[cfg(feature = "load_extension")]
 use std::path::Path;
 use std::ptr;
 use std::str;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex};
 
 use super::ffi;
-use super::{str_for_sqlite, str_to_cstring};
+use super::str_for_sqlite;
 use super::{Connection, InterruptHandle, OpenFlags, Result};
 use crate::error::{error_from_handle, error_from_sqlite_code, Error};
 use crate::raw_statement::RawStatement;
@@ -27,37 +26,35 @@ pub struct InnerConnection {
     // interrupt would only acquire the lock after the query's completion.
     interrupt_lock: Arc<Mutex<*mut ffi::sqlite3>>,
     #[cfg(feature = "hooks")]
-    pub free_commit_hook: Option<fn(*mut ::std::os::raw::c_void)>,
+    pub free_commit_hook: Option<unsafe fn(*mut ::std::os::raw::c_void)>,
     #[cfg(feature = "hooks")]
-    pub free_rollback_hook: Option<fn(*mut ::std::os::raw::c_void)>,
+    pub free_rollback_hook: Option<unsafe fn(*mut ::std::os::raw::c_void)>,
     #[cfg(feature = "hooks")]
-    pub free_update_hook: Option<fn(*mut ::std::os::raw::c_void)>,
+    pub free_update_hook: Option<unsafe fn(*mut ::std::os::raw::c_void)>,
     owned: bool,
 }
 
 impl InnerConnection {
-    #[cfg(not(feature = "hooks"))]
-    pub fn new(db: *mut ffi::sqlite3, owned: bool) -> InnerConnection {
+    #[allow(clippy::mutex_atomic)]
+    pub unsafe fn new(db: *mut ffi::sqlite3, owned: bool) -> InnerConnection {
         InnerConnection {
             db,
             interrupt_lock: Arc::new(Mutex::new(db)),
-            owned,
-        }
-    }
-
-    #[cfg(feature = "hooks")]
-    pub fn new(db: *mut ffi::sqlite3, owned: bool) -> InnerConnection {
-        InnerConnection {
-            db,
-            interrupt_lock: Arc::new(Mutex::new(db)),
+            #[cfg(feature = "hooks")]
             free_commit_hook: None,
+            #[cfg(feature = "hooks")]
             free_rollback_hook: None,
+            #[cfg(feature = "hooks")]
             free_update_hook: None,
             owned,
         }
     }
 
-    pub fn open_with_flags(c_path: &CString, flags: OpenFlags) -> Result<InnerConnection> {
+    pub fn open_with_flags(
+        c_path: &CStr,
+        flags: OpenFlags,
+        vfs: Option<&CStr>,
+    ) -> Result<InnerConnection> {
         #[cfg(not(feature = "bundled"))]
         ensure_valid_sqlite_version();
         ensure_safe_sqlite_threading_mode()?;
@@ -77,16 +74,32 @@ impl InnerConnection {
             ));
         }
 
+        let z_vfs = match vfs {
+            Some(c_vfs) => c_vfs.as_ptr(),
+            None => ptr::null(),
+        };
+
         unsafe {
-            let mut db = MaybeUninit::uninit();
-            let r =
-                ffi::sqlite3_open_v2(c_path.as_ptr(), db.as_mut_ptr(), flags.bits(), ptr::null());
-            let db: *mut ffi::sqlite3 = db.assume_init();
+            let mut db: *mut ffi::sqlite3 = ptr::null_mut();
+            let r = ffi::sqlite3_open_v2(c_path.as_ptr(), &mut db, flags.bits(), z_vfs);
             if r != ffi::SQLITE_OK {
                 let e = if db.is_null() {
-                    error_from_sqlite_code(r, None)
+                    error_from_sqlite_code(r, Some(c_path.to_string_lossy().to_string()))
                 } else {
-                    let e = error_from_handle(db, r);
+                    let mut e = error_from_handle(db, r);
+                    if let Error::SqliteFailure(
+                        ffi::Error {
+                            code: ffi::ErrorCode::CannotOpen,
+                            ..
+                        },
+                        Some(msg),
+                    ) = e
+                    {
+                        e = Error::SqliteFailure(
+                            ffi::Error::new(r),
+                            Some(format!("{}: {}", msg, c_path.to_string_lossy())),
+                        );
+                    }
                     ffi::sqlite3_close(db);
                     e
                 };
@@ -112,10 +125,10 @@ impl InnerConnection {
     }
 
     pub fn decode_result(&mut self, code: c_int) -> Result<()> {
-        InnerConnection::decode_result_raw(self.db(), code)
+        unsafe { InnerConnection::decode_result_raw(self.db(), code) }
     }
 
-    fn decode_result_raw(db: *mut ffi::sqlite3, code: c_int) -> Result<()> {
+    unsafe fn decode_result_raw(db: *mut ffi::sqlite3, code: c_int) -> Result<()> {
         if code == ffi::SQLITE_OK {
             Ok(())
         } else {
@@ -123,6 +136,7 @@ impl InnerConnection {
         }
     }
 
+    #[allow(clippy::mutex_atomic)]
     pub fn close(&mut self) -> Result<()> {
         if self.db.is_null() {
             return Ok(());
@@ -157,7 +171,8 @@ impl InnerConnection {
     }
 
     pub fn execute_batch(&mut self, sql: &str) -> Result<()> {
-        let c_sql = str_to_cstring(sql)?;
+        // use CString instead of SmallCString because it's probably big.
+        let c_sql = std::ffi::CString::new(sql)?;
         unsafe {
             let r = ffi::sqlite3_exec(
                 self.db(),
@@ -180,28 +195,22 @@ impl InnerConnection {
     pub fn load_extension(&self, dylib_path: &Path, entry_point: Option<&str>) -> Result<()> {
         let dylib_str = super::path_to_cstring(dylib_path)?;
         unsafe {
-            let mut errmsg = MaybeUninit::uninit();
+            let mut errmsg: *mut c_char = ptr::null_mut();
             let r = if let Some(entry_point) = entry_point {
-                let c_entry = str_to_cstring(entry_point)?;
+                let c_entry = crate::str_to_cstring(entry_point)?;
                 ffi::sqlite3_load_extension(
                     self.db,
                     dylib_str.as_ptr(),
                     c_entry.as_ptr(),
-                    errmsg.as_mut_ptr(),
+                    &mut errmsg,
                 )
             } else {
-                ffi::sqlite3_load_extension(
-                    self.db,
-                    dylib_str.as_ptr(),
-                    ptr::null(),
-                    errmsg.as_mut_ptr(),
-                )
+                ffi::sqlite3_load_extension(self.db, dylib_str.as_ptr(), ptr::null(), &mut errmsg)
             };
             if r == ffi::SQLITE_OK {
                 Ok(())
             } else {
-                let errmsg: *mut c_char = errmsg.assume_init();
-                let message = super::errmsg_to_string(&*errmsg);
+                let message = super::errmsg_to_string(errmsg);
                 ffi::sqlite3_free(errmsg as *mut ::std::os::raw::c_void);
                 Err(error_from_sqlite_code(r, Some(message)))
             }
@@ -213,9 +222,9 @@ impl InnerConnection {
     }
 
     pub fn prepare<'a>(&mut self, conn: &'a Connection, sql: &str) -> Result<Statement<'a>> {
-        let mut c_stmt = MaybeUninit::uninit();
+        let mut c_stmt = ptr::null_mut();
         let (c_sql, len, _) = str_for_sqlite(sql.as_bytes())?;
-        let mut c_tail = MaybeUninit::uninit();
+        let mut c_tail = ptr::null();
         let r = unsafe {
             if cfg!(feature = "unlock_notify") {
                 let mut rc;
@@ -224,8 +233,8 @@ impl InnerConnection {
                         self.db(),
                         c_sql,
                         len,
-                        c_stmt.as_mut_ptr(),
-                        c_tail.as_mut_ptr(),
+                        &mut c_stmt as *mut *mut ffi::sqlite3_stmt,
+                        &mut c_tail as *mut *const c_char,
                     );
                     if !unlock_notify::is_locked(self.db, rc) {
                         break;
@@ -241,18 +250,22 @@ impl InnerConnection {
                     self.db(),
                     c_sql,
                     len,
-                    c_stmt.as_mut_ptr(),
-                    c_tail.as_mut_ptr(),
+                    &mut c_stmt as *mut *mut ffi::sqlite3_stmt,
+                    &mut c_tail as *mut *const c_char,
                 )
             }
         };
+        // If there is an error, *ppStmt is set to NULL.
         self.decode_result(r)?;
-
-        let c_stmt: *mut ffi::sqlite3_stmt = unsafe { c_stmt.assume_init() };
-        let c_tail: *const c_char = unsafe { c_tail.assume_init() };
+        // If the input text contains no SQL (if the input is an empty string or a
+        // comment) then *ppStmt is set to NULL.
+        let c_stmt: *mut ffi::sqlite3_stmt = c_stmt;
+        let c_tail: *const c_char = c_tail;
         // TODO ignore spaces, comments, ... at the end
         let tail = !c_tail.is_null() && unsafe { c_tail != c_sql.offset(len as isize) };
-        Ok(Statement::new(conn, RawStatement::new(c_stmt, tail)))
+        Ok(Statement::new(conn, unsafe {
+            RawStatement::new(c_stmt, tail)
+        }))
     }
 
     pub fn changes(&mut self) -> usize {
@@ -263,7 +276,7 @@ impl InnerConnection {
         unsafe { ffi::sqlite3_get_autocommit(self.db()) != 0 }
     }
 
-    #[cfg(feature = "bundled")] // 3.8.6
+    #[cfg(feature = "modern_sqlite")] // 3.8.6
     pub fn is_busy(&self) -> bool {
         let db = self.db();
         unsafe {
@@ -298,7 +311,7 @@ impl Drop for InnerConnection {
 }
 
 #[cfg(not(feature = "bundled"))]
-static SQLITE_VERSION_CHECK: Once = Once::new();
+static SQLITE_VERSION_CHECK: std::sync::Once = std::sync::Once::new();
 #[cfg(not(feature = "bundled"))]
 pub static BYPASS_VERSION_CHECK: AtomicBool = AtomicBool::new(false);
 
@@ -346,9 +359,19 @@ rusqlite was built against SQLite {} but the runtime SQLite version is {}. To fi
     });
 }
 
-static SQLITE_INIT: Once = Once::new();
+#[cfg(not(any(target_arch = "wasm32")))]
+static SQLITE_INIT: std::sync::Once = std::sync::Once::new();
+
 pub static BYPASS_SQLITE_INIT: AtomicBool = AtomicBool::new(false);
 
+// threading mode checks are not necessary (and do not work) on target
+// platforms that do not have threading (such as webassembly)
+#[cfg(any(target_arch = "wasm32"))]
+fn ensure_safe_sqlite_threading_mode() -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(any(target_arch = "wasm32")))]
 fn ensure_safe_sqlite_threading_mode() -> Result<()> {
     // Ensure SQLite was compiled in thredsafe mode.
     if unsafe { ffi::sqlite3_threadsafe() == 0 } {

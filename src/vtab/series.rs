@@ -1,25 +1,23 @@
-//! generate series virtual table.
+//! `feature = "series"` Generate series virtual table.
 //!
-//! Port of C [generate series "function"](http://www.sqlite.org/cgi/src/finfo?name=ext/misc/series.c).
+//! Port of C [generate series
+//! "function"](http://www.sqlite.org/cgi/src/finfo?name=ext/misc/series.c):
+//! https://www.sqlite.org/series.html
 use std::default::Default;
 use std::os::raw::c_int;
 
 use crate::ffi;
 use crate::types::Type;
 use crate::vtab::{
-    eponymous_only_module, Context, IndexConstraintOp, IndexInfo, Module, VTab, VTabConnection,
-    VTabCursor, Values,
+    eponymous_only_module, Context, IndexConstraintOp, IndexInfo, VTab, VTabConnection, VTabCursor,
+    Values,
 };
 use crate::{Connection, Result};
 
-/// Register the "generate_series" module.
+/// `feature = "series"` Register the "generate_series" module.
 pub fn load_module(conn: &Connection) -> Result<()> {
     let aux: Option<()> = None;
-    conn.create_module("generate_series", &SERIES_MODULE, aux)
-}
-
-lazy_static::lazy_static! {
-    static ref SERIES_MODULE: Module<SeriesTab> = eponymous_only_module::<SeriesTab>(1);
+    conn.create_module("generate_series", eponymous_only_module::<SeriesTab>(), aux)
 }
 
 // Column numbers
@@ -51,7 +49,7 @@ struct SeriesTab {
     base: ffi::sqlite3_vtab,
 }
 
-impl VTab for SeriesTab {
+unsafe impl VTab for SeriesTab {
     type Aux = ();
     type Cursor = SeriesTabCursor;
 
@@ -183,7 +181,7 @@ impl SeriesTabCursor {
         SeriesTabCursor::default()
     }
 }
-impl VTabCursor for SeriesTabCursor {
+unsafe impl VTabCursor for SeriesTabCursor {
     fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Values<'_>) -> Result<()> {
         let idx_num = QueryPlanFlags::from_bits_truncate(idx_num);
         let mut i = 0;

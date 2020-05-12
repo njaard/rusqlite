@@ -4,6 +4,7 @@ use std::ops::Deref;
 /// Options for transaction behavior. See [BEGIN
 /// TRANSACTION](http://www.sqlite.org/lang_transaction.html) for details.
 #[derive(Copy, Clone)]
+#[non_exhaustive]
 pub enum TransactionBehavior {
     Deferred,
     Immediate,
@@ -12,6 +13,7 @@ pub enum TransactionBehavior {
 
 /// Options for how a Transaction or Savepoint should behave when it is dropped.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DropBehavior {
     /// Roll back the changes. This is the default.
     Rollback,
@@ -90,10 +92,23 @@ pub struct Savepoint<'conn> {
 impl Transaction<'_> {
     /// Begin a new transaction. Cannot be nested; see `savepoint` for nested
     /// transactions.
+    ///
     /// Even though we don't mutate the connection, we take a `&mut Connection`
-    /// so as to prevent nested or concurrent transactions on the same
-    /// connection.
+    /// so as to prevent nested transactions on the same connection. For cases
+    /// where this is unacceptable, [`Transaction::new_unchecked`] is available.
     pub fn new(conn: &mut Connection, behavior: TransactionBehavior) -> Result<Transaction<'_>> {
+        Self::new_unchecked(conn, behavior)
+    }
+
+    /// Begin a new transaction, failing if a transaction is open.
+    ///
+    /// If a transaction is already open, this will return an error. Where
+    /// possible, [`Transaction::new`] should be preferred, as it provides a
+    /// compile-time guarantee that transactions are not nested.
+    pub fn new_unchecked(
+        conn: &Connection,
+        behavior: TransactionBehavior,
+    ) -> Result<Transaction<'_>> {
         let query = match behavior {
             TransactionBehavior::Deferred => "BEGIN DEFERRED",
             TransactionBehavior::Immediate => "BEGIN IMMEDIATE",
@@ -367,6 +382,41 @@ impl Connection {
         Transaction::new(self, behavior)
     }
 
+    /// Begin a new transaction with the default behavior (DEFERRED).
+    ///
+    /// Attempt to open a nested transaction will result in a SQLite error.
+    /// `Connection::transaction` prevents this at compile time by taking `&mut
+    /// self`, but `Connection::unchecked_transaction()` may be used to defer
+    /// the checking until runtime.
+    ///
+    /// See [`Connection::transaction`] and [`Transaction::new_unchecked`]
+    /// (which can be used if the default transaction behavior is undesirable).
+    ///
+    /// ## Example
+    ///
+    /// ```rust,no_run
+    /// # use rusqlite::{Connection, Result};
+    /// # use std::rc::Rc;
+    /// # fn do_queries_part_1(_conn: &Connection) -> Result<()> { Ok(()) }
+    /// # fn do_queries_part_2(_conn: &Connection) -> Result<()> { Ok(()) }
+    /// fn perform_queries(conn: Rc<Connection>) -> Result<()> {
+    ///     let tx = conn.unchecked_transaction()?;
+    ///
+    ///     do_queries_part_1(&tx)?; // tx causes rollback if this fails
+    ///     do_queries_part_2(&tx)?; // tx causes rollback if this fails
+    ///
+    ///     tx.commit()
+    /// }
+    /// ```
+    ///
+    /// # Failure
+    ///
+    /// Will return `Err` if the underlying SQLite call fails. The specific
+    /// error returned if transactions are nested is currently unspecified.
+    pub fn unchecked_transaction(&self) -> Result<Transaction<'_>> {
+        Transaction::new_unchecked(self, TransactionBehavior::Deferred)
+    }
+
     /// Begin a new savepoint with the default behavior (DEFERRED).
     ///
     /// The savepoint defaults to rolling back when it is dropped. If you want
@@ -440,6 +490,44 @@ mod test {
                     .unwrap()
             );
         }
+    }
+    fn assert_nested_tx_error(e: crate::Error) {
+        if let crate::Error::SqliteFailure(e, Some(m)) = &e {
+            assert_eq!(e.extended_code, crate::ffi::SQLITE_ERROR);
+            // FIXME: Not ideal...
+            assert_eq!(e.code, crate::ErrorCode::Unknown);
+            assert!(m.contains("transaction"));
+        } else {
+            panic!("Unexpected error type: {:?}", e);
+        }
+    }
+
+    #[test]
+    fn test_unchecked_nesting() {
+        let db = checked_memory_handle();
+
+        {
+            let tx = db.unchecked_transaction().unwrap();
+            let e = tx.unchecked_transaction().unwrap_err();
+            assert_nested_tx_error(e);
+            // default: rollback
+        }
+        {
+            let tx = db.unchecked_transaction().unwrap();
+            tx.execute_batch("INSERT INTO foo VALUES(1)").unwrap();
+            // Ensure this doesn't interfere with ongoing transaction
+            let e = tx.unchecked_transaction().unwrap_err();
+            assert_nested_tx_error(e);
+
+            tx.execute_batch("INSERT INTO foo VALUES(1)").unwrap();
+            tx.commit().unwrap();
+        }
+
+        assert_eq!(
+            2i32,
+            db.query_row::<i32, _>("SELECT SUM(x) FROM foo", &[], |r| r.get(0))
+                .unwrap()
+        );
     }
 
     #[test]

@@ -10,6 +10,7 @@ use std::str;
 /// Enum listing possible errors from rusqlite.
 #[derive(Debug)]
 #[allow(clippy::enum_variant_names)]
+#[non_exhaustive]
 pub enum Error {
     /// An error from an underlying SQLite call.
     SqliteFailure(ffi::Error, Option<String>),
@@ -20,7 +21,7 @@ pub enum Error {
 
     /// Error when the value of a particular column is requested, but it cannot
     /// be converted to the requested Rust type.
-    FromSqlConversionFailure(usize, Type, Box<dyn error::Error + Send + Sync>),
+    FromSqlConversionFailure(usize, Type, Box<dyn error::Error + Send + Sync + 'static>),
 
     /// Error when SQLite gives us an integral value outside the range of the
     /// requested type (e.g., trying to get the value 1000 into a `u8`).
@@ -79,10 +80,10 @@ pub enum Error {
     /// `create_scalar_function`).
     #[cfg(feature = "functions")]
     #[allow(dead_code)]
-    UserFunctionError(Box<dyn error::Error + Send + Sync>),
+    UserFunctionError(Box<dyn error::Error + Send + Sync + 'static>),
 
     /// Error available for the implementors of the `ToSql` trait.
-    ToSqlConversionFailure(Box<dyn error::Error + Send + Sync>),
+    ToSqlConversionFailure(Box<dyn error::Error + Send + Sync + 'static>),
 
     /// Error when the SQL is not a `SELECT`, is not read-only.
     InvalidQuery,
@@ -103,6 +104,10 @@ pub enum Error {
 
     /// Error when the SQL contains multiple statements.
     MultipleStatement,
+    /// Error when the number of bound parameters does not match the number of
+    /// parameters in the query. The first `usize` is how many parameters were
+    /// given, the 2nd is how many were expected.
+    InvalidParameterCount(usize, usize),
 }
 
 impl PartialEq for Error {
@@ -142,7 +147,10 @@ impl PartialEq for Error {
             (Error::UnwindingPanic, Error::UnwindingPanic) => true,
             #[cfg(feature = "functions")]
             (Error::GetAuxWrongType, Error::GetAuxWrongType) => true,
-            (_, _) => false,
+            (Error::InvalidParameterCount(i1, n1), Error::InvalidParameterCount(i2, n2)) => {
+                i1 == i2 && n1 == n2
+            }
+            (..) => false,
         }
     }
 }
@@ -227,6 +235,11 @@ impl fmt::Display for Error {
                 "Invalid column type {} at index: {}, name: {}",
                 t, i, name
             ),
+            Error::InvalidParameterCount(i1, n1) => write!(
+                f,
+                "Wrong number of parameters passed to query. Got {}, needed {}",
+                i1, n1
+            ),
             Error::StatementChangedRows(i) => write!(f, "Query changed {} rows", i),
 
             #[cfg(feature = "functions")]
@@ -253,69 +266,30 @@ impl fmt::Display for Error {
 }
 
 impl error::Error for Error {
-    fn description(&self) -> &str {
-        match *self {
-            Error::SqliteFailure(ref err, None) => err.description(),
-            Error::SqliteFailure(_, Some(ref s)) => s,
-            Error::SqliteSingleThreadedMode => {
-                "SQLite was compiled or configured for single-threaded use only"
-            }
-            Error::FromSqlConversionFailure(_, _, ref err) => err.description(),
-            Error::IntegralValueOutOfRange(_, _) => "integral value out of range of requested type",
-            Error::Utf8Error(ref err) => err.description(),
-            Error::InvalidParameterName(_) => "invalid parameter name",
-            Error::NulError(ref err) => err.description(),
-            Error::InvalidPath(_) => "invalid path",
-            Error::ExecuteReturnedResults => {
-                "execute returned results - did you mean to call query?"
-            }
-            Error::QueryReturnedNoRows => "query returned no rows",
-            Error::InvalidColumnIndex(_) => "invalid column index",
-            Error::InvalidColumnName(_) => "invalid column name",
-            Error::InvalidColumnType(_, _, _) => "invalid column type",
-            Error::StatementChangedRows(_) => "query inserted zero or more than one row",
-
-            #[cfg(feature = "functions")]
-            Error::InvalidFunctionParameterType(_, _) => "invalid function parameter type",
-            #[cfg(feature = "vtab")]
-            Error::InvalidFilterParameterType(_, _) => "invalid filter parameter type",
-            #[cfg(feature = "functions")]
-            Error::UserFunctionError(ref err) => err.description(),
-            Error::ToSqlConversionFailure(ref err) => err.description(),
-            Error::InvalidQuery => "query is not read-only",
-            #[cfg(feature = "vtab")]
-            Error::ModuleError(ref desc) => desc,
-            #[cfg(feature = "functions")]
-            Error::UnwindingPanic => "unwinding panic",
-            #[cfg(feature = "functions")]
-            Error::GetAuxWrongType => "get_aux called with wrong type",
-            Error::MultipleStatement => "multiple statements provided",
-        }
-    }
-
-    fn cause(&self) -> Option<&dyn error::Error> {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match *self {
             Error::SqliteFailure(ref err, _) => Some(err),
             Error::Utf8Error(ref err) => Some(err),
             Error::NulError(ref err) => Some(err),
 
-            Error::IntegralValueOutOfRange(_, _)
+            Error::IntegralValueOutOfRange(..)
             | Error::SqliteSingleThreadedMode
             | Error::InvalidParameterName(_)
             | Error::ExecuteReturnedResults
             | Error::QueryReturnedNoRows
             | Error::InvalidColumnIndex(_)
             | Error::InvalidColumnName(_)
-            | Error::InvalidColumnType(_, _, _)
+            | Error::InvalidColumnType(..)
             | Error::InvalidPath(_)
+            | Error::InvalidParameterCount(..)
             | Error::StatementChangedRows(_)
             | Error::InvalidQuery
             | Error::MultipleStatement => None,
 
             #[cfg(feature = "functions")]
-            Error::InvalidFunctionParameterType(_, _) => None,
+            Error::InvalidFunctionParameterType(..) => None,
             #[cfg(feature = "vtab")]
-            Error::InvalidFilterParameterType(_, _) => None,
+            Error::InvalidFilterParameterType(..) => None,
 
             #[cfg(feature = "functions")]
             Error::UserFunctionError(ref err) => Some(&**err),
@@ -341,11 +315,11 @@ pub fn error_from_sqlite_code(code: c_int, message: Option<String>) -> Error {
     Error::SqliteFailure(ffi::Error::new(code), message)
 }
 
-pub fn error_from_handle(db: *mut ffi::sqlite3, code: c_int) -> Error {
+pub unsafe fn error_from_handle(db: *mut ffi::sqlite3, code: c_int) -> Error {
     let message = if db.is_null() {
         None
     } else {
-        Some(unsafe { errmsg_to_string(ffi::sqlite3_errmsg(db)) })
+        Some(errmsg_to_string(ffi::sqlite3_errmsg(db)))
     };
     error_from_sqlite_code(code, message)
 }

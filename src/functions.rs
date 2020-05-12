@@ -1,4 +1,4 @@
-//! Create or redefine SQL functions.
+//! `feature = "functions"` Create or redefine SQL functions.
 //!
 //! # Example
 //!
@@ -10,42 +10,34 @@
 //!
 //! ```rust
 //! use regex::Regex;
+//! use rusqlite::functions::FunctionFlags;
 //! use rusqlite::{Connection, Error, Result};
-//! use std::collections::HashMap;
+//! use std::sync::Arc;
+//! type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 //!
 //! fn add_regexp_function(db: &Connection) -> Result<()> {
-//!     db.create_scalar_function("regexp", 2, true, move |ctx| {
-//!         assert_eq!(ctx.len(), 2, "called with unexpected number of arguments");
+//!     db.create_scalar_function(
+//!         "regexp",
+//!         2,
+//!         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+//!         move |ctx| {
+//!             assert_eq!(ctx.len(), 2, "called with unexpected number of arguments");
+//!             let regexp: Arc<Regex> = ctx
+//!                 .get_or_create_aux(0, |vr| -> Result<_, BoxError> {
+//!                     Ok(Regex::new(vr.as_str()?)?)
+//!                 })?;
+//!             let is_match = {
+//!                 let text = ctx
+//!                     .get_raw(1)
+//!                     .as_str()
+//!                     .map_err(|e| Error::UserFunctionError(e.into()))?;
 //!
-//!         let saved_re: Option<&Regex> = ctx.get_aux(0)?;
-//!         let new_re = match saved_re {
-//!             None => {
-//!                 let s = ctx.get::<String>(0)?;
-//!                 match Regex::new(&s) {
-//!                     Ok(r) => Some(r),
-//!                     Err(err) => return Err(Error::UserFunctionError(Box::new(err))),
-//!                 }
-//!             }
-//!             Some(_) => None,
-//!         };
+//!                 regexp.is_match(text)
+//!             };
 //!
-//!         let is_match = {
-//!             let re = saved_re.unwrap_or_else(|| new_re.as_ref().unwrap());
-//!
-//!             let text = ctx
-//!                 .get_raw(1)
-//!                 .as_str()
-//!                 .map_err(|e| Error::UserFunctionError(e.into()))?;
-//!
-//!             re.is_match(text)
-//!         };
-//!
-//!         if let Some(re) = new_re {
-//!             ctx.set_aux(0, re);
-//!         }
-//!
-//!         Ok(is_match)
-//!     })
+//!             Ok(is_match)
+//!         },
+//!     )
 //! }
 //!
 //! fn main() -> Result<()> {
@@ -62,11 +54,12 @@
 //!     Ok(())
 //! }
 //! ```
-use std::error::Error as StdError;
+use std::any::Any;
 use std::os::raw::{c_int, c_void};
 use std::panic::{catch_unwind, RefUnwindSafe, UnwindSafe};
 use std::ptr;
 use std::slice;
+use std::sync::Arc;
 
 use crate::ffi;
 use crate::ffi::sqlite3_context;
@@ -82,11 +75,11 @@ unsafe fn report_error(ctx: *mut sqlite3_context, err: &Error) {
     // an explicit feature check for that, and this doesn't really warrant one.
     // We'll use the extended code if we're on the bundled version (since it's
     // at least 3.17.0) and the normal constraint error code if not.
-    #[cfg(feature = "bundled")]
+    #[cfg(feature = "modern_sqlite")]
     fn constraint_error_code() -> i32 {
         ffi::SQLITE_CONSTRAINT_FUNCTION
     }
-    #[cfg(not(feature = "bundled"))]
+    #[cfg(not(feature = "modern_sqlite"))]
     fn constraint_error_code() -> i32 {
         ffi::SQLITE_CONSTRAINT
     }
@@ -100,7 +93,7 @@ unsafe fn report_error(ctx: *mut sqlite3_context, err: &Error) {
         }
         _ => {
             ffi::sqlite3_result_error_code(ctx, constraint_error_code());
-            if let Ok(cstr) = str_to_cstring(err.description()) {
+            if let Ok(cstr) = str_to_cstring(&err.to_string()) {
                 ffi::sqlite3_result_error(ctx, cstr.as_ptr(), -1);
             }
         }
@@ -111,7 +104,8 @@ unsafe extern "C" fn free_boxed_value<T>(p: *mut c_void) {
     drop(Box::from_raw(p as *mut T));
 }
 
-/// Context is a wrapper for the SQLite function evaluation context.
+/// `feature = "functions"` Context is a wrapper for the SQLite function
+/// evaluation context.
 pub struct Context<'a> {
     ctx: *mut sqlite3_context,
     args: &'a [*mut sqlite3_value],
@@ -168,40 +162,69 @@ impl Context<'_> {
         unsafe { ValueRef::from_value(arg) }
     }
 
+    /// Fetch or insert the the auxilliary data associated with a particular
+    /// parameter. This is intended to be an easier-to-use way of fetching it
+    /// compared to calling `get_aux` and `set_aux` separately.
+    ///
+    /// See https://www.sqlite.org/c3ref/get_auxdata.html for a discussion of
+    /// this feature, or the unit tests of this module for an example.
+    pub fn get_or_create_aux<T, E, F>(&self, arg: c_int, func: F) -> Result<Arc<T>>
+    where
+        T: Send + Sync + 'static,
+        E: Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
+        F: FnOnce(ValueRef<'_>) -> Result<T, E>,
+    {
+        if let Some(v) = self.get_aux(arg)? {
+            Ok(v)
+        } else {
+            let vr = self.get_raw(arg as usize);
+            self.set_aux(
+                arg,
+                func(vr).map_err(|e| Error::UserFunctionError(e.into()))?,
+            )
+        }
+    }
+
     /// Sets the auxilliary data associated with a particular parameter. See
     /// https://www.sqlite.org/c3ref/get_auxdata.html for a discussion of
     /// this feature, or the unit tests of this module for an example.
-    pub fn set_aux<T: 'static>(&self, arg: c_int, value: T) {
-        let boxed = Box::into_raw(Box::new((std::any::TypeId::of::<T>(), value)));
+    pub fn set_aux<T: Send + Sync + 'static>(&self, arg: c_int, value: T) -> Result<Arc<T>> {
+        let orig: Arc<T> = Arc::new(value);
+        let inner: AuxInner = orig.clone();
+        let outer = Box::new(inner);
+        let raw: *mut AuxInner = Box::into_raw(outer);
         unsafe {
             ffi::sqlite3_set_auxdata(
                 self.ctx,
                 arg,
-                boxed as *mut c_void,
-                Some(free_boxed_value::<(std::any::TypeId, T)>),
+                raw as *mut _,
+                Some(free_boxed_value::<AuxInner>),
             )
         };
+        Ok(orig)
     }
 
-    /// Gets the auxilliary data that was associated with a given parameter
-    /// via `set_aux`. Returns `Ok(None)` if no data has been associated,
-    /// and .
-    pub fn get_aux<T: 'static>(&self, arg: c_int) -> Result<Option<&T>> {
-        let p = unsafe { ffi::sqlite3_get_auxdata(self.ctx, arg) as *mut (std::any::TypeId, T) };
+    /// Gets the auxilliary data that was associated with a given parameter via
+    /// `set_aux`. Returns `Ok(None)` if no data has been associated, and
+    /// Ok(Some(v)) if it has. Returns an error if the requested type does not
+    /// match.
+    pub fn get_aux<T: Send + Sync + 'static>(&self, arg: c_int) -> Result<Option<Arc<T>>> {
+        let p = unsafe { ffi::sqlite3_get_auxdata(self.ctx, arg) as *const AuxInner };
         if p.is_null() {
             Ok(None)
         } else {
-            let id_val = unsafe { &*p };
-            if std::any::TypeId::of::<T>() != id_val.0 {
-                Err(Error::GetAuxWrongType)
-            } else {
-                Ok(Some(&id_val.1))
-            }
+            let v: AuxInner = AuxInner::clone(unsafe { &*p });
+            v.downcast::<T>()
+                .map(Some)
+                .map_err(|_| Error::GetAuxWrongType)
         }
     }
 }
 
-/// Aggregate is the callback interface for user-defined aggregate function.
+type AuxInner = Arc<dyn Any + Send + Sync + 'static>;
+
+/// `feature = "functions"` Aggregate is the callback interface for user-defined
+/// aggregate function.
 ///
 /// `A` is the type of the aggregation context and `T` is the type of the final
 /// result. Implementations should be stateless.
@@ -227,8 +250,8 @@ where
     fn finalize(&self, _: Option<A>) -> Result<T>;
 }
 
-/// WindowAggregate is the callback interface for user-defined aggregate window
-/// function.
+/// `feature = "window"` WindowAggregate is the callback interface for
+/// user-defined aggregate window function.
 #[cfg(feature = "window")]
 pub trait WindowAggregate<A, T>: Aggregate<A, T>
 where
@@ -243,8 +266,31 @@ where
     fn inverse(&self, _: &mut Context<'_>, _: &mut A) -> Result<()>;
 }
 
+bitflags::bitflags! {
+    #[doc = "Function Flags."]
+    #[doc = "See [sqlite3_create_function](https://sqlite.org/c3ref/create_function.html) for details."]
+    #[repr(C)]
+    pub struct FunctionFlags: ::std::os::raw::c_int {
+        const SQLITE_UTF8     = ffi::SQLITE_UTF8;
+        const SQLITE_UTF16LE  = ffi::SQLITE_UTF16LE;
+        const SQLITE_UTF16BE  = ffi::SQLITE_UTF16BE;
+        const SQLITE_UTF16    = ffi::SQLITE_UTF16;
+        const SQLITE_DETERMINISTIC = ffi::SQLITE_DETERMINISTIC;
+        const SQLITE_DIRECTONLY    = 0x0000_0008_0000; // 3.30.0
+        const SQLITE_SUBTYPE       = 0x0000_0010_0000; // 3.30.0
+        const SQLITE_INNOCUOUS     = 0x0000_0020_0000; // 3.31.0
+    }
+}
+
+impl Default for FunctionFlags {
+    fn default() -> FunctionFlags {
+        FunctionFlags::SQLITE_UTF8
+    }
+}
+
 impl Connection {
-    /// Attach a user-defined scalar function to this database connection.
+    /// `feature = "functions"` Attach a user-defined scalar function to
+    /// this database connection.
     ///
     /// `fn_name` is the name the function will be accessible from SQL.
     /// `n_arg` is the number of arguments to the function. Use `-1` for a
@@ -257,12 +303,18 @@ impl Connection {
     /// # Example
     ///
     /// ```rust
-    /// # use rusqlite::{Connection, Result, &[]};
+    /// # use rusqlite::{Connection, Result};
+    /// # use rusqlite::functions::FunctionFlags;
     /// fn scalar_function_example(db: Connection) -> Result<()> {
-    ///     db.create_scalar_function("halve", 1, true, |ctx| {
-    ///         let value = ctx.get::<f64>(0)?;
-    ///         Ok(value / 2f64)
-    ///     })?;
+    ///     db.create_scalar_function(
+    ///         "halve",
+    ///         1,
+    ///         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+    ///         |ctx| {
+    ///             let value = ctx.get::<f64>(0)?;
+    ///             Ok(value / 2f64)
+    ///         },
+    ///     )?;
     ///
     ///     let six_halved: f64 = db.query_row("SELECT halve(6)", &[], |r| r.get(0))?;
     ///     assert_eq!(six_halved, 3f64);
@@ -277,7 +329,7 @@ impl Connection {
         &self,
         fn_name: &str,
         n_arg: c_int,
-        deterministic: bool,
+        flags: FunctionFlags,
         x_func: F,
     ) -> Result<()>
     where
@@ -286,10 +338,11 @@ impl Connection {
     {
         self.db
             .borrow_mut()
-            .create_scalar_function(fn_name, n_arg, deterministic, x_func)
+            .create_scalar_function(fn_name, n_arg, flags, x_func)
     }
 
-    /// Attach a user-defined aggregate function to this database connection.
+    /// `feature = "functions"` Attach a user-defined aggregate function to this
+    /// database connection.
     ///
     /// # Failure
     ///
@@ -298,7 +351,7 @@ impl Connection {
         &self,
         fn_name: &str,
         n_arg: c_int,
-        deterministic: bool,
+        flags: FunctionFlags,
         aggr: D,
     ) -> Result<()>
     where
@@ -308,15 +361,20 @@ impl Connection {
     {
         self.db
             .borrow_mut()
-            .create_aggregate_function(fn_name, n_arg, deterministic, aggr)
+            .create_aggregate_function(fn_name, n_arg, flags, aggr)
     }
 
+    /// `feature = "window"` Attach a user-defined aggregate window function to
+    /// this database connection.
+    ///
+    /// See https://sqlite.org/windowfunctions.html#udfwinfunc for more
+    /// information.
     #[cfg(feature = "window")]
     pub fn create_window_function<A, W, T>(
         &self,
         fn_name: &str,
         n_arg: c_int,
-        deterministic: bool,
+        flags: FunctionFlags,
         aggr: W,
     ) -> Result<()>
     where
@@ -326,10 +384,11 @@ impl Connection {
     {
         self.db
             .borrow_mut()
-            .create_window_function(fn_name, n_arg, deterministic, aggr)
+            .create_window_function(fn_name, n_arg, flags, aggr)
     }
 
-    /// Removes a user-defined function from this database connection.
+    /// `feature = "functions"` Removes a user-defined function from this
+    /// database connection.
     ///
     /// `fn_name` and `n_arg` should match the name and number of arguments
     /// given to `create_scalar_function` or `create_aggregate_function`.
@@ -347,7 +406,7 @@ impl InnerConnection {
         &mut self,
         fn_name: &str,
         n_arg: c_int,
-        deterministic: bool,
+        flags: FunctionFlags,
         x_func: F,
     ) -> Result<()>
     where
@@ -389,16 +448,12 @@ impl InnerConnection {
 
         let boxed_f: *mut F = Box::into_raw(Box::new(x_func));
         let c_name = str_to_cstring(fn_name)?;
-        let mut flags = ffi::SQLITE_UTF8;
-        if deterministic {
-            flags |= ffi::SQLITE_DETERMINISTIC;
-        }
         let r = unsafe {
             ffi::sqlite3_create_function_v2(
                 self.db(),
                 c_name.as_ptr(),
                 n_arg,
-                flags,
+                flags.bits(),
                 boxed_f as *mut c_void,
                 Some(call_boxed_closure::<F, T>),
                 None,
@@ -413,7 +468,7 @@ impl InnerConnection {
         &mut self,
         fn_name: &str,
         n_arg: c_int,
-        deterministic: bool,
+        flags: FunctionFlags,
         aggr: D,
     ) -> Result<()>
     where
@@ -423,16 +478,12 @@ impl InnerConnection {
     {
         let boxed_aggr: *mut D = Box::into_raw(Box::new(aggr));
         let c_name = str_to_cstring(fn_name)?;
-        let mut flags = ffi::SQLITE_UTF8;
-        if deterministic {
-            flags |= ffi::SQLITE_DETERMINISTIC;
-        }
         let r = unsafe {
             ffi::sqlite3_create_function_v2(
                 self.db(),
                 c_name.as_ptr(),
                 n_arg,
-                flags,
+                flags.bits(),
                 boxed_aggr as *mut c_void,
                 None,
                 Some(call_boxed_step::<A, D, T>),
@@ -448,7 +499,7 @@ impl InnerConnection {
         &mut self,
         fn_name: &str,
         n_arg: c_int,
-        deterministic: bool,
+        flags: FunctionFlags,
         aggr: W,
     ) -> Result<()>
     where
@@ -458,16 +509,12 @@ impl InnerConnection {
     {
         let boxed_aggr: *mut W = Box::into_raw(Box::new(aggr));
         let c_name = str_to_cstring(fn_name)?;
-        let mut flags = ffi::SQLITE_UTF8;
-        if deterministic {
-            flags |= ffi::SQLITE_DETERMINISTIC;
-        }
         let r = unsafe {
             ffi::sqlite3_create_window_function(
                 self.db(),
                 c_name.as_ptr(),
                 n_arg,
-                flags,
+                flags.bits(),
                 boxed_aggr as *mut c_void,
                 Some(call_boxed_step::<A, W, T>),
                 Some(call_boxed_final::<A, W, T>),
@@ -689,7 +736,7 @@ mod test {
 
     #[cfg(feature = "window")]
     use crate::functions::WindowAggregate;
-    use crate::functions::{Aggregate, Context};
+    use crate::functions::{Aggregate, Context, FunctionFlags};
     use crate::{Connection, Error, Result};
 
     fn half(ctx: &Context<'_>) -> Result<c_double> {
@@ -701,7 +748,13 @@ mod test {
     #[test]
     fn test_function_half() {
         let db = Connection::open_in_memory().unwrap();
-        db.create_scalar_function("half", 1, true, half).unwrap();
+        db.create_scalar_function(
+            "half",
+            1,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            half,
+        )
+        .unwrap();
         let result: Result<f64> = db.query_row("SELECT half(6)", &[], |r| r.get(0));
 
         assert!((3f64 - result.unwrap()).abs() < EPSILON);
@@ -710,7 +763,13 @@ mod test {
     #[test]
     fn test_remove_function() {
         let db = Connection::open_in_memory().unwrap();
-        db.create_scalar_function("half", 1, true, half).unwrap();
+        db.create_scalar_function(
+            "half",
+            1,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            half,
+        )
+        .unwrap();
         let result: Result<f64> = db.query_row("SELECT half(6)", &[], |r| r.get(0));
         assert!((3f64 - result.unwrap()).abs() < EPSILON);
 
@@ -724,33 +783,20 @@ mod test {
     // expression multiple times within one query.
     fn regexp_with_auxilliary(ctx: &Context<'_>) -> Result<bool> {
         assert_eq!(ctx.len(), 2, "called with unexpected number of arguments");
-
-        let saved_re: Option<&Regex> = ctx.get_aux(0)?;
-        let new_re = match saved_re {
-            None => {
-                let s = ctx.get::<String>(0)?;
-                match Regex::new(&s) {
-                    Ok(r) => Some(r),
-                    Err(err) => return Err(Error::UserFunctionError(Box::new(err))),
-                }
-            }
-            Some(_) => None,
-        };
+        type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
+        let regexp: std::sync::Arc<Regex> = ctx
+            .get_or_create_aux(0, |vr| -> Result<_, BoxError> {
+                Ok(Regex::new(vr.as_str()?)?)
+            })?;
 
         let is_match = {
-            let re = saved_re.unwrap_or_else(|| new_re.as_ref().unwrap());
-
             let text = ctx
                 .get_raw(1)
                 .as_str()
                 .map_err(|e| Error::UserFunctionError(e.into()))?;
 
-            re.is_match(text)
+            regexp.is_match(text)
         };
-
-        if let Some(re) = new_re {
-            ctx.set_aux(0, re);
-        }
 
         Ok(is_match)
     }
@@ -767,8 +813,13 @@ mod test {
              END;",
         )
         .unwrap();
-        db.create_scalar_function("regexp", 2, true, regexp_with_auxilliary)
-            .unwrap();
+        db.create_scalar_function(
+            "regexp",
+            2,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            regexp_with_auxilliary,
+        )
+        .unwrap();
 
         let result: Result<bool> =
             db.query_row("SELECT regexp('l.s[aeiouy]', 'lisa')", &[], |r| {
@@ -789,16 +840,21 @@ mod test {
     #[test]
     fn test_varargs_function() {
         let db = Connection::open_in_memory().unwrap();
-        db.create_scalar_function("my_concat", -1, true, |ctx| {
-            let mut ret = String::new();
+        db.create_scalar_function(
+            "my_concat",
+            -1,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| {
+                let mut ret = String::new();
 
-            for idx in 0..ctx.len() {
-                let s = ctx.get::<String>(idx)?;
-                ret.push_str(&s);
-            }
+                for idx in 0..ctx.len() {
+                    let s = ctx.get::<String>(idx)?;
+                    ret.push_str(&s);
+                }
 
-            Ok(ret)
-        })
+                Ok(ret)
+            },
+        )
         .unwrap();
 
         for &(expected, query) in &[
@@ -814,12 +870,12 @@ mod test {
     #[test]
     fn test_get_aux_type_checking() {
         let db = Connection::open_in_memory().unwrap();
-        db.create_scalar_function("example", 2, false, |ctx| {
+        db.create_scalar_function("example", 2, FunctionFlags::default(), |ctx| {
             if !ctx.get::<bool>(1)? {
-                ctx.set_aux::<i64>(0, 100);
+                ctx.set_aux::<i64>(0, 100)?;
             } else {
                 assert_eq!(ctx.get_aux::<String>(0), Err(Error::GetAuxWrongType));
-                assert_eq!(ctx.get_aux::<i64>(0), Ok(Some(&100)));
+                assert_eq!(*ctx.get_aux::<i64>(0).unwrap().unwrap(), 100);
             }
             Ok(true)
         })
@@ -872,8 +928,13 @@ mod test {
     #[test]
     fn test_sum() {
         let db = Connection::open_in_memory().unwrap();
-        db.create_aggregate_function("my_sum", 1, true, Sum)
-            .unwrap();
+        db.create_aggregate_function(
+            "my_sum",
+            1,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            Sum,
+        )
+        .unwrap();
 
         // sum should return NULL when given no columns (contrast with count below)
         let no_result = "SELECT my_sum(i) FROM (SELECT 2 AS i WHERE 1 <> 1)";
@@ -895,8 +956,13 @@ mod test {
     #[test]
     fn test_count() {
         let db = Connection::open_in_memory().unwrap();
-        db.create_aggregate_function("my_count", -1, true, Count)
-            .unwrap();
+        db.create_aggregate_function(
+            "my_count",
+            -1,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            Count,
+        )
+        .unwrap();
 
         // count should return 0 when given no columns (contrast with sum above)
         let no_result = "SELECT my_count(i) FROM (SELECT 2 AS i WHERE 1 <> 1)";
@@ -926,7 +992,13 @@ mod test {
         use fallible_iterator::FallibleIterator;
 
         let db = Connection::open_in_memory().unwrap();
-        db.create_window_function("sumint", 1, true, Sum).unwrap();
+        db.create_window_function(
+            "sumint",
+            1,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            Sum,
+        )
+        .unwrap();
         db.execute_batch(
             "CREATE TABLE t3(x, y);
              INSERT INTO t3 VALUES('a', 4),
